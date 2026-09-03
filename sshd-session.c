@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd-session.c,v 1.20 2026/02/09 21:38:14 dtucker Exp $ */
+/* $OpenBSD: sshd-session.c,v 1.25 2026/07/09 02:20:19 djm Exp $ */
 /*
  * SSH2 implementation:
  * Privilege Separation:
@@ -443,6 +443,7 @@ get_hostkey_by_type(int type, int nid, int need_private, struct ssh *ssh)
 		case KEY_ED25519_CERT:
 		case KEY_ECDSA_SK_CERT:
 		case KEY_ED25519_SK_CERT:
+		case KEY_MLDSA44_ED25519_CERT:
 			key = sensitive_data.host_certificates[i];
 			break;
 		default:
@@ -794,7 +795,7 @@ main(int ac, char **av)
 	const char *remote_ip, *rdomain;
 	char *line, *laddr, *logfile = NULL;
 	u_int i;
-	u_int64_t ibytes, obytes;
+	uint64_t ibytes, obytes;
 	mode_t new_umask;
 	Authctxt *authctxt;
 	struct connection_info *connection_info = NULL;
@@ -1141,8 +1142,8 @@ main(int ac, char **av)
 	setproctitle("%s", "[accepted]");
 
 	/* Executed child processes don't need these. */
-	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
-	fcntl(sock_in, F_SETFD, FD_CLOEXEC);
+	FD_CLOSEONEXEC(sock_out);
+	FD_CLOSEONEXEC(sock_in);
 
 	/* We will not restart on SIGHUP since it no longer makes sense. */
 	ssh_signal(SIGALRM, SIG_DFL);
@@ -1224,13 +1225,6 @@ main(int ac, char **av)
 			fatal("login grace time setitimer failed");
 	}
 
-	if ((r = kex_exchange_identification(ssh, -1,
-	    options.version_addendum)) != 0)
-		sshpkt_fatal(ssh, r, "banner exchange");
-
-	if ((ssh->compat & SSH_BUG_NOREKEY))
-		debug("client does not support rekeying");
-
 	ssh_packet_set_nonblocking(ssh);
 
 	/* allocate authentication context */
@@ -1253,6 +1247,8 @@ main(int ac, char **av)
 		fatal("privsep_preauth failed");
 
 	/* Now user is authenticated */
+
+	setproctitle("%s [postauth]", authctxt->user);
 
 	/*
 	 * Cancel the alarm we set to limit the time taken for

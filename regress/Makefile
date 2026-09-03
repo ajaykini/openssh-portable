@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.143 2026/02/15 22:29:30 dtucker Exp $
+#	$OpenBSD: Makefile,v 1.146 2026/08/04 02:48:00 djm Exp $
 
 tests:		prep file-tests t-exec unit
 
@@ -118,7 +118,8 @@ LTESTS= 	connect \
 		penalty-expire \
 		connect-bigconf \
 		ssh-pkcs11 \
-		ssh-tty
+		ssh-tty \
+		proxyjump
 
 INTEROP_TESTS=	putty-transfer putty-ciphers putty-kex conch-ciphers
 INTEROP_TESTS+=	dropbear-ciphers dropbear-kex dropbear-server
@@ -307,6 +308,9 @@ unit unit-bench:
 			-d ${.CURDIR}/unittests/hostkeys/testdata $${ARGS}; \
 		$$V ${.OBJDIR}/unittests/match/test_match $${ARGS}; \
 		$$V ${.OBJDIR}/unittests/misc/test_misc $${ARGS}; \
+		$$V ${.OBJDIR}/unittests/servconf/test_servconf $${ARGS}; \
+		$$V ${.OBJDIR}/unittests/crypto/test_crypto \
+			-d ${.CURDIR}/unittests/crypto/testdata $${ARGS}; \
 		if test "x${TEST_SSH_UTF8}" = "xyes"  ; then \
 			$$V ${.OBJDIR}/unittests/utf8/test_utf8 $${ARGS}; \
 		fi \

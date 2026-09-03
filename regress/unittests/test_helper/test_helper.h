@@ -1,4 +1,4 @@
-/*	$OpenBSD: test_helper.h,v 1.11 2025/12/05 11:13:35 djm Exp $	*/
+/*	$OpenBSD: test_helper.h,v 1.13 2026/06/16 22:27:10 dtucker Exp $	*/
 /*
  * Copyright (c) 2011 Damien Miller <djm@mindrot.org>
  *
@@ -38,6 +38,8 @@ typedef void (test_onerror_func_t)(void *);
 /* Supplied by test suite */
 void tests(void);
 void benchmarks(void);
+
+void hex2bin(uint8_t *, const char *, size_t);
 
 const char *test_data_file(const char *name);
 void test_start(const char *n);
@@ -89,16 +91,16 @@ void assert_ptr(const char *file, int line,
     const void *aa1, const void *aa2, enum test_predicate pred);
 void assert_u8(const char *file, int line,
     const char *a1, const char *a2,
-    u_int8_t aa1, u_int8_t aa2, enum test_predicate pred);
+    uint8_t aa1, uint8_t aa2, enum test_predicate pred);
 void assert_u16(const char *file, int line,
     const char *a1, const char *a2,
-    u_int16_t aa1, u_int16_t aa2, enum test_predicate pred);
+    uint16_t aa1, uint16_t aa2, enum test_predicate pred);
 void assert_u32(const char *file, int line,
     const char *a1, const char *a2,
-    u_int32_t aa1, u_int32_t aa2, enum test_predicate pred);
+    uint32_t aa1, uint32_t aa2, enum test_predicate pred);
 void assert_u64(const char *file, int line,
     const char *a1, const char *a2,
-    u_int64_t aa1, u_int64_t aa2, enum test_predicate pred);
+    uint64_t aa1, uint64_t aa2, enum test_predicate pred);
 void assert_double(const char *file, int line,
     const char *a1, const char *a2,
     double aa1, double aa2, enum test_predicate pred);

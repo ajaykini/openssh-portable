@@ -60,7 +60,7 @@ AC_PATH_PROG([SH], [bash])
 AC_PATH_PROG([SH], [ksh])
 AC_PATH_PROG([SH], [sh])
 AC_PATH_PROG([GROFF], [groff])
-AC_PATH_PROG([NROFF], [nroff awf])
+AC_PATH_PROGS([NROFF], [nroff awf])
 AC_PATH_PROG([MANDOC], [mandoc])
 AC_PATH_TOOL([PKGCONFIG], [pkg-config], [no])
 AC_SUBST([TEST_SHELL], [sh])
@@ -358,6 +358,19 @@ AC_COMPILE_IFELSE(
     [ AC_MSG_RESULT([no]) ]
 )
 
+saved_CFLAGS="$CFLAGS"
+CFLAGS="$CFLAGS -Werror"
+AC_MSG_CHECKING([if compiler supports __nonstring__ attribute on char arrays])
+AC_COMPILE_IFELSE(
+    [AC_LANG_PROGRAM([[#include <stdlib.h>]],
+    [[ char __attribute__ ((__nonstring__)) h[5] = "hello"; return h[0]!='h'; ]])],
+    [ AC_MSG_RESULT([yes])
+      AC_DEFINE(HAVE_ATTRIBUTE__NONSTRING__, [1],
+	 [compiler supports nonstring attribute]) ],
+    [ AC_MSG_RESULT([no]) ]
+)
+CFLAGS="$saved_CFLAGS"
+
 if test "x$no_attrib_nonnull" != "x1" ; then
 	AC_DEFINE([HAVE_ATTRIBUTE__NONNULL__], [1], [Have attribute nonnull])
 fi
@@ -574,18 +587,6 @@ for include in sys/queue.h sys/tree.h; do
 		;;
 	esac >"$header"
 done
-
-AC_CHECK_DECLS([le32toh, le64toh, htole64], [], [], [
-#ifdef HAVE_SYS_TYPES_H
-# include <sys/types.h>
-#endif
-#ifdef HAVE_STDINT_H
-# include <stdint.h>
-#endif
-#ifdef HAVE_ENDIAN_H
-# include <endian.h>
-#endif
-])
 
 # On some platforms (eg SunOS4) sys/audit.h requires sys/[time|types|label.h]
 # to be included first.
@@ -846,6 +847,7 @@ int main(void) { if (NSVersionOfRunTimeLibrary("System") >= (60 << 16))
 	AC_CHECK_LIB([sandbox], [sandbox_apply], [
 	    SSHDLIBS="$SSHDLIBS -lsandbox"
 	])
+	AC_CHECK_DECLS(kSBXProfilePureComputation, [], [], [#include <sandbox.h>])
 	# proc_pidinfo()-based closefrom() replacement.
 	AC_CHECK_HEADERS([libproc.h])
 	AC_CHECK_FUNCS([proc_pidinfo])
@@ -1516,6 +1518,18 @@ int main(int argc, char **argv) {
 			AC_CHECK_HEADERS([libgen.h])
 		fi
 	])
+])
+
+AC_CHECK_DECLS([le32toh, le64toh, htole64, htobe32], [], [], [
+#ifdef HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#endif
+#ifdef HAVE_STDINT_H
+# include <stdint.h>
+#endif
+#ifdef HAVE_ENDIAN_H
+# include <endian.h>
+#endif
 ])
 
 AC_CHECK_FUNC([getspnam], ,
@@ -2214,6 +2228,7 @@ AC_CHECK_FUNCS([ \
 	truncate \
 	unlinkat \
 	unsetenv \
+	unveil \
 	updwtmpx \
 	utimensat \
 	user_from_uid \
@@ -3003,8 +3018,15 @@ nocrypto_saved_LIBS="$LIBS"
 if test "x$openssl" = "xyes" ; then
 	LIBS="-lcrypto $LIBS"
 	CHANNELLIBS="-lcrypto $CHANNELLIBS"
-	AC_TRY_LINK_FUNC([RAND_add], ,
-	    [AC_MSG_ERROR([*** working libcrypto not found, check config.log])])
+	AC_TRY_LINK_FUNC([RAND_add], , [
+	    # As of early 2026, BoringSSL libcrypto needs -lstdc++ for
+	    # destructors so try that before giving up.
+	    LIBS="$LIBS -lstdc++"
+	    CHANNELLIBS="$CHANNELLIBS -lstdc++"
+	    AC_TRY_LINK_FUNC([RAND_add], , [
+		AC_MSG_ERROR([*** working libcrypto not found, check config.log])
+	    ])
+	])
 	AC_CHECK_HEADER([openssl/opensslv.h], ,
 	    [AC_MSG_ERROR([*** OpenSSL headers missing - please install first or check config.log ***])])
 
@@ -3092,8 +3114,9 @@ if test "x$openssl" = "xyes" ; then
 			100*|10100*) # 1.0.x, 1.1.0x
 				AC_MSG_ERROR([OpenSSL >= 1.1.1 required (have "$ssl_showver")])
 				;;
-			101*)   ;; # 1.1.x
-			200*)   # LibreSSL
+			101*)   openssl_impl="openssl" # 1.1.x
+				;;
+			200*)   openssl_impl="libressl"
 				lver=`echo "$sslver" | sed 's/.*libressl-//'`
 				case "$lver" in
 				2*|300*) # 2.x, 3.0.0
@@ -3102,7 +3125,7 @@ if test "x$openssl" = "xyes" ; then
 				*) ;;	# Assume all other versions are good.
 				esac
 				;;
-			30*|40*)
+			30*|40*) openssl_impl="openssl"
 				# OpenSSL 3 & 4; we use the 1.1x API
 				# https://openssl.org/policies/general/versioning-policy.html
 				CPPFLAGS="$CPPFLAGS -DOPENSSL_API_COMPAT=0x10100000L"
@@ -3168,7 +3191,7 @@ if test "x$openssl" = "xyes" ; then
 	AC_MSG_CHECKING([if programs using OpenSSL functions will link])
 	AC_LINK_IFELSE(
 		[AC_LANG_PROGRAM([[ #include <openssl/err.h> ]],
-		[[ ERR_load_crypto_strings(); ]])],
+		[[ OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL); ]])],
 		[
 			AC_MSG_RESULT([yes])
 		],
@@ -3178,7 +3201,7 @@ if test "x$openssl" = "xyes" ; then
 			AC_MSG_CHECKING([if programs using OpenSSL need -ldl])
 			AC_LINK_IFELSE(
 				[AC_LANG_PROGRAM([[ #include <openssl/err.h> ]],
-				[[ ERR_load_crypto_strings(); ]])],
+				[[ OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL); ]])],
 				[
 					AC_MSG_RESULT([yes])
 					CHANNELLIBS="$CHANNELLIBS -ldl"
@@ -3189,6 +3212,18 @@ if test "x$openssl" = "xyes" ; then
 			)
 		]
 	)
+
+	AC_CHECK_DECL([OPENSSL_IS_AWSLC],
+	    [openssl_impl="aws-lc"], [],
+	    [#include <openssl/base.h>]
+	)
+	AC_CHECK_DECL([OPENSSL_IS_BORINGSSL],
+	    [openssl_impl="boringssl"], [],
+	    [#include <openssl/base.h>]
+	)
+
+	AC_MSG_CHECKING([OpenSSL implementation])
+	AC_MSG_RESULT([$openssl_impl])
 
 	AC_CHECK_FUNCS([ \
 		BN_is_prime_ex \
@@ -3219,12 +3254,23 @@ if test "x$openssl" = "xyes" ; then
 	])
 
 	if test "x$openssl_engine" = "xyes" ; then
+		AC_CHECK_HEADERS([openssl/opensslconf.h openssl/configuration.h])
 		AC_MSG_CHECKING([for OpenSSL ENGINE support])
 		AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+	#ifdef HAVE_OPENSSL_OPENSSLCONF_H
+	# include <openssl/opensslconf.h>
+	#endif
+	#ifdef HAVE_OPENSSL_CONFIGURATION_H
+	# include <openssl/configuration.h>
+	#endif
 	#include <openssl/engine.h>
 			]], [[
+				#ifndef OPENSSL_NO_ENGINE
 				ENGINE_load_builtin_engines();
 				ENGINE_register_all_complete();
+				#else
+				#error "OPENSSL_NO_ENGINE"
+				#endif
 			]])],
 			[ AC_MSG_RESULT([yes])
 			  AC_DEFINE([USE_OPENSSL_ENGINE], [1],
@@ -3232,26 +3278,6 @@ if test "x$openssl" = "xyes" ; then
 			], [ AC_MSG_ERROR([OpenSSL ENGINE support not found])
 		])
 	fi
-
-	# Check for OpenSSL without EVP_aes_{192,256}_cbc
-	AC_MSG_CHECKING([whether OpenSSL lacks support for AES 192/256])
-	AC_LINK_IFELSE(
-		[AC_LANG_PROGRAM([[
-	#include <stdlib.h>
-	#include <string.h>
-	#include <openssl/evp.h>
-		]], [[
-		exit(EVP_aes_192_cbc() == NULL || EVP_aes_256_cbc() == NULL);
-		]])],
-		[
-			AC_MSG_RESULT([no])
-		],
-		[
-			AC_MSG_RESULT([yes])
-			AC_DEFINE([OPENSSL_LOBOTOMISED_AES], [1],
-			    [libcrypto is missing AES 192 and 256 bit functions])
-		]
-	)
 
 	AC_MSG_CHECKING([if EVP_DigestUpdate returns an int])
 	AC_LINK_IFELSE(
@@ -3277,7 +3303,7 @@ if test "x$openssl" = "xyes" ; then
 	AC_CHECK_FUNCS([EVP_sha256 EVP_sha384 EVP_sha512 EVP_chacha20])
 
 	# Check complete ECC support in OpenSSL
-	AC_MSG_CHECKING([whether OpenSSL has NID_X9_62_prime256v1])
+	AC_MSG_CHECKING([whether OpenSSL has ECC support])
 	AC_LINK_IFELSE(
 		[AC_LANG_PROGRAM([[
 	#include <openssl/ec.h>
@@ -3288,102 +3314,15 @@ if test "x$openssl" = "xyes" ; then
 	#include <openssl/opensslv.h>
 		]], [[
 		EC_KEY *e = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+		EC_KEY *f = EC_KEY_new_by_curve_name(NID_secp384r1);
+		EC_KEY *g = EC_KEY_new_by_curve_name(NID_secp521r1);
 		const EVP_MD *m = EVP_sha256(); /* We need this too */
 		]])],
-		[ AC_MSG_RESULT([yes])
-		  enable_nistp256=1 ],
-		[ AC_MSG_RESULT([no]) ]
+		[ AC_MSG_RESULT([yes]) ],
+		[ AC_MSG_ERROR([libcrypto does not have required ECC support]) ]
 	)
-
-	AC_MSG_CHECKING([whether OpenSSL has NID_secp384r1])
-	AC_LINK_IFELSE(
-		[AC_LANG_PROGRAM([[
-	#include <openssl/ec.h>
-	#include <openssl/ecdh.h>
-	#include <openssl/ecdsa.h>
-	#include <openssl/evp.h>
-	#include <openssl/objects.h>
-	#include <openssl/opensslv.h>
-		]], [[
-		EC_KEY *e = EC_KEY_new_by_curve_name(NID_secp384r1);
-		const EVP_MD *m = EVP_sha384(); /* We need this too */
-		]])],
-		[ AC_MSG_RESULT([yes])
-		  enable_nistp384=1 ],
-		[ AC_MSG_RESULT([no]) ]
-	)
-
-	AC_MSG_CHECKING([whether OpenSSL has NID_secp521r1])
-	AC_LINK_IFELSE(
-		[AC_LANG_PROGRAM([[
-	#include <openssl/ec.h>
-	#include <openssl/ecdh.h>
-	#include <openssl/ecdsa.h>
-	#include <openssl/evp.h>
-	#include <openssl/objects.h>
-	#include <openssl/opensslv.h>
-		]], [[
-		EC_KEY *e = EC_KEY_new_by_curve_name(NID_secp521r1);
-		const EVP_MD *m = EVP_sha512(); /* We need this too */
-		]])],
-		[ AC_MSG_RESULT([yes])
-		  AC_MSG_CHECKING([if OpenSSL's NID_secp521r1 is functional])
-		  AC_RUN_IFELSE(
-			[AC_LANG_PROGRAM([[
-	#include <stdlib.h>
-	#include <openssl/ec.h>
-	#include <openssl/ecdh.h>
-	#include <openssl/ecdsa.h>
-	#include <openssl/evp.h>
-	#include <openssl/objects.h>
-	#include <openssl/opensslv.h>
-			]],[[
-			EC_KEY *e = EC_KEY_new_by_curve_name(NID_secp521r1);
-			const EVP_MD *m = EVP_sha512(); /* We need this too */
-			exit(e == NULL || m == NULL);
-			]])],
-			[ AC_MSG_RESULT([yes])
-			  enable_nistp521=1 ],
-			[ AC_MSG_RESULT([no]) ],
-			[ AC_MSG_WARN([cross-compiling: assuming yes])
-			  enable_nistp521=1 ]
-		  )],
-		AC_MSG_RESULT([no])
-	)
-
-	if test x$enable_nistp256 = x1 || test x$enable_nistp384 = x1 || \
-	    test x$enable_nistp521 = x1; then
-		AC_DEFINE(OPENSSL_HAS_ECC, [1], [OpenSSL has ECC])
-		AC_CHECK_FUNCS([EC_KEY_METHOD_new])
-		openssl_ecc=yes
-	else
-		openssl_ecc=no
-	fi
-	if test x$enable_nistp256 = x1; then
-		AC_DEFINE([OPENSSL_HAS_NISTP256], [1],
-		    [libcrypto has NID_X9_62_prime256v1])
-	else
-		unsupported_algorithms="$unsupported_algorithms \
-			ecdsa-sha2-nistp256 \
-			ecdh-sha2-nistp256 \
-			ecdsa-sha2-nistp256-cert-v01@openssh.com"
-	fi
-	if test x$enable_nistp384 = x1; then
-		AC_DEFINE([OPENSSL_HAS_NISTP384], [1], [libcrypto has NID_secp384r1])
-	else
-		unsupported_algorithms="$unsupported_algorithms \
-			ecdsa-sha2-nistp384 \
-			ecdh-sha2-nistp384 \
-			ecdsa-sha2-nistp384-cert-v01@openssh.com"
-	fi
-	if test x$enable_nistp521 = x1; then
-		AC_DEFINE([OPENSSL_HAS_NISTP521], [1], [libcrypto has NID_secp521r1])
-	else
-		unsupported_algorithms="$unsupported_algorithms \
-			ecdh-sha2-nistp521 \
-			ecdsa-sha2-nistp521 \
-			ecdsa-sha2-nistp521-cert-v01@openssh.com"
-	fi
+	# Check for EC_KEY_METHOD support for ECDSA PKCS#11
+	AC_CHECK_FUNCS([EC_KEY_METHOD_new])
 
 	# Check libcrypto ED25519 support
 	AC_CHECK_FUNCS([EVP_PKEY_get_raw_public_key])
@@ -3412,17 +3351,30 @@ if test "x$openssl" = "xyes" ; then
 			AC_MSG_RESULT([no])
 		]
 	)
+
+	case "$openssl_impl" in
+	aws-lc|boringssl)
+		# Brainpool does not work with AWC-LS or BoringSSL.
+		unsupported_algorithms="$unsupported_algorithms mlkem768brainpoolp256r1-sha256"
+		;;
+	*)
+		AC_CHECK_DECL([NID_brainpoolP256r1],
+		    [AC_DEFINE([USE_BRAINPOOLP256R1], [1], [Enable brainpool])],
+		    [],
+		    [[#include <openssl/evp.h>]]
+		)
+		;;
+	esac
+
 fi
 
 # PKCS11/U2F depend on OpenSSL and dlopen().
 enable_pkcs11=yes
 enable_sk=yes
 
-AC_CHECK_DECL([OPENSSL_IS_AWSLC],
-	[enable_pkcs11="disabled; PKCS#11 not supported with AWS-LC"],
-	[],
-	[#include <openssl/base.h>]
-)
+if test "x$openssl_impl" = "xaws-lc"; then
+	enable_pkcs11="disabled; PKCS#11 not supported with AWS-LC"
+fi
 if test "x$ac_cv_func_dlopen" != "xyes" ; then
 	enable_pkcs11="disabled; missing dlopen(3)"
 	enable_sk="disabled; missing dlopen(3)"
@@ -3953,10 +3905,12 @@ fi
 
 if test "x$sandbox_arg" = "xdarwin" || \
      ( test -z "$sandbox_arg" && test "x$ac_cv_func_sandbox_init" = "xyes" && \
-       test "x$ac_cv_header_sandbox_h" = "xyes") ; then
+       test "x$ac_cv_header_sandbox_h" = "xyes" && \
+       test "x$ac_cv_have_decl_kSBXProfilePureComputation" = "xyes") ; then
 	test "x$ac_cv_func_sandbox_init" != "xyes" -o \
-	     "x$ac_cv_header_sandbox_h" != "xyes" && \
-		AC_MSG_ERROR([Darwin seatbelt sandbox requires sandbox.h and sandbox_init function])
+	     "x$ac_cv_header_sandbox_h" != "xyes" -o \
+	     "x$ac_cv_have_decl_kSBXProfilePureComputation" != "xyes" && \
+		AC_MSG_ERROR([Darwin seatbelt sandbox requires sandbox.h, sandbox_init() and kSBXProfilePureComputation])
 	SANDBOX_STYLE="darwin"
 	AC_DEFINE([SANDBOX_DARWIN], [1], [Sandbox using Darwin sandbox_init(3)])
 elif test "x$sandbox_arg" = "xseccomp_filter" || \

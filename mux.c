@@ -1,4 +1,4 @@
-/* $OpenBSD: mux.c,v 1.110 2026/02/14 00:18:34 jsg Exp $ */
+/* $OpenBSD: mux.c,v 1.113 2026/04/02 07:39:57 djm Exp $ */
 /*
  * Copyright (c) 2002-2008 Damien Miller <djm@openbsd.org>
  *
@@ -626,7 +626,7 @@ compare_forward(struct Forward *a, struct Forward *b)
 }
 
 static void
-mux_confirm_remote_forward(struct ssh *ssh, int type, u_int32_t seq, void *ctxt)
+mux_confirm_remote_forward(struct ssh *ssh, int type, uint32_t seq, void *ctxt)
 {
 	struct mux_channel_confirm_ctx *fctx = ctxt;
 	char *failmsg = NULL;
@@ -1172,6 +1172,16 @@ mux_master_process_proxy(struct ssh *ssh, u_int rid,
 
 	debug_f("channel %d: proxy request", c->self);
 
+	if (options.control_master == SSHCTL_MASTER_ASK ||
+	    options.control_master == SSHCTL_MASTER_AUTO_ASK) {
+		if (!ask_permission("Allow multiplex proxy connection?")) {
+			debug2_f("proxy refused by user");
+			reply_error(reply, MUX_S_PERMISSION_DENIED, rid,
+			    "Permission denied");
+			return 0;
+		}
+	}
+
 	c->mux_rcb = channel_proxy_downstream;
 	if ((r = sshbuf_put_u32(reply, MUX_S_PROXY)) != 0 ||
 	    (r = sshbuf_put_u32(reply, rid)) != 0)
@@ -1435,12 +1445,8 @@ mux_session_confirm(struct ssh *ssh, int id, int success, void *arg)
 		}
 	}
 
-	if (cctx->want_agent_fwd && options.forward_agent) {
-		debug("Requesting authentication agent forwarding.");
-		channel_request_start(ssh, id, "auth-agent-req@openssh.com", 0);
-		if ((r = sshpkt_send(ssh)) != 0)
-			fatal_fr(r, "send");
-	}
+	if (cctx->want_agent_fwd && options.forward_agent)
+		client_channel_reqest_agent_forwarding(ssh, id);
 
 	client_session2_setup(ssh, id, cctx->want_tty, cctx->want_subsys,
 	    cctx->term, &cctx->tio, c->rfd, cctx->cmd, cctx->env);

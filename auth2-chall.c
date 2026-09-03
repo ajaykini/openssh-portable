@@ -1,4 +1,4 @@
-/* $OpenBSD: auth2-chall.c,v 1.59 2026/02/06 22:59:18 dtucker Exp $ */
+/* $OpenBSD: auth2-chall.c,v 1.61 2026/07/06 07:44:48 djm Exp $ */
 /*
  * Copyright (c) 2001 Markus Friedl.  All rights reserved.
  * Copyright (c) 2001 Per Allansson.  All rights reserved.
@@ -51,7 +51,7 @@ extern ServerOptions options;
 
 static int auth2_challenge_start(struct ssh *);
 static int send_userauth_info_request(struct ssh *);
-static int input_userauth_info_response(int, u_int32_t, struct ssh *);
+static int input_userauth_info_response(int, uint32_t, struct ssh *);
 
 #ifdef BSD_AUTH
 extern KbdintDevice mm_bsdauth_device;
@@ -291,7 +291,7 @@ send_userauth_info_request(struct ssh *ssh)
 }
 
 static int
-input_userauth_info_response(int type, u_int32_t seq, struct ssh *ssh)
+input_userauth_info_response(int type, uint32_t seq, struct ssh *ssh)
 {
 	Authctxt *authctxt = ssh->authctxt;
 	KbdintAuthctxt *kbdintctxt;
@@ -300,6 +300,7 @@ input_userauth_info_response(int type, u_int32_t seq, struct ssh *ssh)
 	u_int i, nresp;
 	const char *devicename = NULL;
 	char **response = NULL;
+	double tstart = monotime_double();
 
 	if (authctxt == NULL)
 		fatal_f("no authctxt");
@@ -358,6 +359,9 @@ input_userauth_info_response(int type, u_int32_t seq, struct ssh *ssh)
 			auth2_challenge_start(ssh);
 		}
 	}
+
+	if (!authenticated)
+		auth_failure_delay(authctxt, tstart);
 	userauth_finish(ssh, authenticated, "keyboard-interactive",
 	    devicename);
 	return 0;

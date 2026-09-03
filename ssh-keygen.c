@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-keygen.c,v 1.489 2026/02/11 17:05:32 dtucker Exp $ */
+/* $OpenBSD: ssh-keygen.c,v 1.494 2026/08/22 12:48:18 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1994 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -80,6 +80,8 @@
 #define DEFAULT_BITS		3072
 #define DEFAULT_BITS_ECDSA	256
 
+#define KEY_COMMENT_MAX		(NI_MAXHOST + 1024)
+
 static int quiet = 0;
 
 /* Flag indicating that we just want to see the key fingerprint */
@@ -109,8 +111,8 @@ static char *cert_key_id = NULL;
 static char *cert_principals = NULL;
 
 /* Validity period for certificates */
-static u_int64_t cert_valid_from = 0;
-static u_int64_t cert_valid_to = ~0ULL;
+static uint64_t cert_valid_from = 0;
+static uint64_t cert_valid_to = ~0ULL;
 
 /* Certificate options */
 #define CERTOPT_X_FWD				(1)
@@ -122,7 +124,7 @@ static u_int64_t cert_valid_to = ~0ULL;
 #define CERTOPT_REQUIRE_VERIFY			(1<<6)
 #define CERTOPT_DEFAULT	(CERTOPT_X_FWD|CERTOPT_AGENT_FWD| \
 			 CERTOPT_PORT_FWD|CERTOPT_PTY|CERTOPT_USER_RC)
-static u_int32_t certflags_flags = CERTOPT_DEFAULT;
+static uint32_t certflags_flags = CERTOPT_DEFAULT;
 static char *certflags_command = NULL;
 static char *certflags_src_addr = NULL;
 
@@ -166,13 +168,13 @@ static char hostname[NI_MAXHOST];
 
 #ifdef WITH_OPENSSL
 /* moduli.c */
-int gen_candidates(FILE *, u_int32_t, BIGNUM *);
-int prime_test(FILE *, FILE *, u_int32_t, u_int32_t, char *, unsigned long,
+int gen_candidates(FILE *, uint32_t, BIGNUM *);
+int prime_test(FILE *, FILE *, uint32_t, uint32_t, char *, unsigned long,
     unsigned long);
 #endif
 
 static void
-type_bits_valid(int type, const char *name, u_int32_t *bitsp)
+type_bits_valid(int type, const char *name, uint32_t *bitsp)
 {
 	if (type == KEY_UNSPEC)
 		fatal("unknown key type %s", key_type_name);
@@ -206,13 +208,8 @@ type_bits_valid(int type, const char *name, u_int32_t *bitsp)
 		break;
 	case KEY_ECDSA:
 		if (sshkey_ecdsa_bits_to_nid(*bitsp) == -1)
-#ifdef OPENSSL_HAS_NISTP521
 			fatal("Invalid ECDSA key length: valid lengths are "
 			    "256, 384 or 521 bits");
-#else
-			fatal("Invalid ECDSA key length: valid lengths are "
-			    "256 or 384 bits");
-#endif
 	}
 #endif
 }
@@ -251,7 +248,6 @@ ask_filename(struct passwd *pw, const char *prompt)
 		name = _PATH_SSH_CLIENT_ID_ED25519;
 	else {
 		switch (sshkey_type_from_shortname(key_type_name)) {
-#ifdef OPENSSL_HAS_ECC
 		case KEY_ECDSA_CERT:
 		case KEY_ECDSA:
 			name = _PATH_SSH_CLIENT_ID_ECDSA;
@@ -260,7 +256,6 @@ ask_filename(struct passwd *pw, const char *prompt)
 		case KEY_ECDSA_SK:
 			name = _PATH_SSH_CLIENT_ID_ECDSA_SK;
 			break;
-#endif
 		case KEY_RSA_CERT:
 		case KEY_RSA:
 			name = _PATH_SSH_CLIENT_ID_RSA;
@@ -272,6 +267,10 @@ ask_filename(struct passwd *pw, const char *prompt)
 		case KEY_ED25519_SK:
 		case KEY_ED25519_SK_CERT:
 			name = _PATH_SSH_CLIENT_ID_ED25519_SK;
+			break;
+		case KEY_MLDSA44_ED25519:
+		case KEY_MLDSA44_ED25519_CERT:
+			name = _PATH_SSH_CLIENT_ID_MLDSA44_ED25519;
 			break;
 		default:
 			fatal("bad key type");
@@ -360,13 +359,11 @@ do_convert_to_pkcs8(struct sshkey *k)
 		    EVP_PKEY_get0_RSA(k->pkey)))
 			fatal("PEM_write_RSA_PUBKEY failed");
 		break;
-#ifdef OPENSSL_HAS_ECC
 	case KEY_ECDSA:
 		if (!PEM_write_EC_PUBKEY(stdout,
 		    EVP_PKEY_get0_EC_KEY(k->pkey)))
 			fatal("PEM_write_EC_PUBKEY failed");
 		break;
-#endif
 	default:
 		fatal_f("unsupported key type %s", sshkey_type(k));
 	}
@@ -381,13 +378,11 @@ do_convert_to_pem(struct sshkey *k)
 		    EVP_PKEY_get0_RSA(k->pkey)))
 			fatal("PEM_write_RSAPublicKey failed");
 		break;
-#ifdef OPENSSL_HAS_ECC
 	case KEY_ECDSA:
 		if (!PEM_write_EC_PUBKEY(stdout,
 		    EVP_PKEY_get0_EC_KEY(k->pkey)))
 			fatal("PEM_write_EC_PUBKEY failed");
 		break;
-#endif
 	default:
 		fatal_f("unsupported key type %s", sshkey_type(k));
 	}
@@ -669,7 +664,6 @@ do_convert_from_pkcs8(struct sshkey **k, int *private)
 		(*k)->pkey = pubkey;
 		pubkey = NULL;
 		break;
-#ifdef OPENSSL_HAS_ECC
 	case EVP_PKEY_EC:
 		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
 			fatal("sshkey_new failed");
@@ -679,7 +673,6 @@ do_convert_from_pkcs8(struct sshkey **k, int *private)
 		(*k)->pkey = pubkey;
 		pubkey = NULL;
 		break;
-#endif
 	default:
 		fatal_f("unsupported pubkey type %d",
 		    EVP_PKEY_base_id(pubkey));
@@ -743,13 +736,11 @@ do_convert_from(struct passwd *pw)
 			fprintf(stdout, "\n");
 	} else {
 		switch (k->type) {
-#ifdef OPENSSL_HAS_ECC
 		case KEY_ECDSA:
 			ok = PEM_write_ECPrivateKey(stdout,
 			    EVP_PKEY_get0_EC_KEY(k->pkey), NULL, NULL, 0,
 			    NULL, NULL);
 			break;
-#endif
 		case KEY_RSA:
 			ok = PEM_write_RSAPrivateKey(stdout,
 			    EVP_PKEY_get0_RSA(k->pkey), NULL, NULL, 0,
@@ -1010,19 +1001,21 @@ do_gen_all_hostkeys(struct passwd *pw)
 	} key_types[] = {
 #ifdef WITH_OPENSSL
 		{ "rsa", "RSA" ,_PATH_HOST_RSA_KEY_FILE },
-#ifdef OPENSSL_HAS_ECC
 		{ "ecdsa", "ECDSA",_PATH_HOST_ECDSA_KEY_FILE },
-#endif /* OPENSSL_HAS_ECC */
 #endif /* WITH_OPENSSL */
 		{ "ed25519", "ED25519",_PATH_HOST_ED25519_KEY_FILE },
+#ifdef USE_MLDSA
+		{ "mldsa44-ed25519", "MLDSA44-ED25519",
+		     _PATH_HOST_MLDSA44_ED25519_KEY_FILE },
+#endif
 		{ NULL, NULL, NULL }
 	};
 
-	u_int32_t bits = 0;
+	uint32_t bits = 0;
 	int first = 0;
 	struct stat st;
 	struct sshkey *private, *public;
-	char comment[1024], *prv_tmp, *pub_tmp, *prv_file, *pub_file;
+	char comment[KEY_COMMENT_MAX], *prv_tmp, *pub_tmp, *prv_file, *pub_file;
 	int i, type, fd, r;
 
 	for (i = 0; key_types[i].key_type; i++) {
@@ -1358,13 +1351,14 @@ do_known_hosts(struct passwd *pw, const char *name, int find_host,
  * for the current user.
  */
 static void
-do_change_passphrase(struct passwd *pw)
+do_change_passphrase(struct passwd *pw, char * const *opts, size_t nopts)
 {
 	char *comment;
 	char *old_passphrase, *passphrase1, *passphrase2;
 	struct stat st;
 	struct sshkey *private;
 	int r;
+	size_t i;
 
 	if (!have_identity)
 		ask_filename(pw, "Enter file in which the key is");
@@ -1390,6 +1384,38 @@ do_change_passphrase(struct passwd *pw)
 	}
 	if (comment)
 		mprintf("Key has comment '%s'\n", comment);
+
+	/* All current -O options relate to FIDO keys only */
+	if (nopts != 0 && !sshkey_is_sk(private)) {
+		fatal("FIDO-specific option requested for non-FIDO key %s",
+		    identity_file);
+	}
+	if (sshkey_is_sk(private)) {
+		debug_f("%s: original FIDO key flags: "
+		    "%stouch-required %sverify-required", identity_file,
+		    (private->sk_flags & SSH_SK_USER_PRESENCE_REQD) ? "": "no-",
+		    (private->sk_flags & SSH_SK_USER_VERIFICATION_REQD) ? "" : "no-");
+	}
+	for (i = 0; i < nopts; i++) {
+		if (strcasecmp(opts[i], "touch-required") == 0)
+			private->sk_flags |= SSH_SK_USER_PRESENCE_REQD;
+		else if (strcasecmp(opts[i], "no-touch-required") == 0)
+			private->sk_flags &= ~SSH_SK_USER_PRESENCE_REQD;
+		else if (strcasecmp(opts[i], "verify-required") == 0)
+			private->sk_flags |= SSH_SK_USER_VERIFICATION_REQD;
+		else if (strcasecmp(opts[i], "no-verify-required") == 0)
+			private->sk_flags &= ~SSH_SK_USER_VERIFICATION_REQD;
+		else {
+			fatal("Option \"%s\" is unsupported for "
+			    "key passphrase change", opts[i]);
+		}
+	}
+	if (sshkey_is_sk(private) && nopts != 0) {
+		debug_f("%s: updated FIDO key flags: "
+		    "%stouch-required %sverify-required", identity_file,
+		    (private->sk_flags & SSH_SK_USER_PRESENCE_REQD) ? "": "no-",
+		    (private->sk_flags & SSH_SK_USER_VERIFICATION_REQD) ? "" : "no-");
+	}
 
 	/* Ask the new passphrase (twice). */
 	if (identity_new_passphrase) {
@@ -1477,7 +1503,7 @@ do_print_resource_record(struct passwd *pw, char *fname, char *hname,
 static void
 do_change_comment(struct passwd *pw, const char *identity_comment)
 {
-	char new_comment[1024], *comment, *passphrase;
+	char new_comment[KEY_COMMENT_MAX], *comment, *passphrase;
 	struct sshkey *private;
 	struct sshkey *public;
 	struct stat st;
@@ -1806,7 +1832,7 @@ do_ca_sign(struct passwd *pw, const char *ca_key_path, int prefer_agent,
 		if ((r = sshkey_to_certified(public)) != 0)
 			fatal_r(r, "Could not upgrade key %s to certificate", tmp);
 		public->cert->type = cert_key_type;
-		public->cert->serial = (u_int64_t)cert_serial;
+		public->cert->serial = (uint64_t)cert_serial;
 		public->cert->key_id = xstrdup(cert_key_id);
 		public->cert->nprincipals = n;
 		public->cert->principals = plist;
@@ -1875,7 +1901,7 @@ do_ca_sign(struct passwd *pw, const char *ca_key_path, int prefer_agent,
 #endif
 }
 
-static u_int64_t
+static uint64_t
 parse_relative_time(const char *s, time_t now)
 {
 	int64_t mul, secs;
@@ -1886,7 +1912,7 @@ parse_relative_time(const char *s, time_t now)
 		fatal("Invalid relative certificate time %s", s);
 	if (mul == -1 && secs > now)
 		fatal("Certificate time %s cannot be represented", s);
-	return now + (u_int64_t)(secs * mul);
+	return now + (uint64_t)(secs * mul);
 }
 
 static void
@@ -1947,7 +1973,7 @@ parse_cert_times(char *timespec)
 	if (*to == '-' || *to == '+')
 		cert_valid_to = parse_relative_time(to, now);
 	else if (strcmp(to, "forever") == 0)
-		cert_valid_to = ~(u_int64_t)0;
+		cert_valid_to = ~(uint64_t)0;
 	else if (strncmp(to, "0x", 2) == 0)
 		parse_hex_u64(to, &cert_valid_to);
 	else if (parse_absolute_time(to, &cert_valid_to) != 0)
@@ -2963,7 +2989,7 @@ do_moduli_screen(const char *out_file, char **opts, size_t nopts)
 #ifdef WITH_OPENSSL
 	/* Moduli generation/screening */
 	char *checkpoint = NULL;
-	u_int32_t generator_wanted = 0;
+	uint32_t generator_wanted = 0;
 	unsigned long start_lineno = 0, lines_to_process = 0;
 	int prime_tests = 0;
 	FILE *out, *in = stdin;
@@ -2980,7 +3006,7 @@ do_moduli_screen(const char *out_file, char **opts, size_t nopts)
 			free(checkpoint);
 			checkpoint = xstrdup(p);
 		} else if ((p = strprefix(opts[i], "generator=", 0)) != NULL) {
-			generator_wanted = (u_int32_t)strtonum(p, 1, UINT_MAX,
+			generator_wanted = (uint32_t)strtonum(p, 1, UINT_MAX,
 			    &errstr);
 			if (errstr != NULL) {
 				fatal("Generator invalid: %s (%s)", p, errstr);
@@ -3239,7 +3265,7 @@ usage(void)
 	fprintf(stderr,
 	    "usage: ssh-keygen [-q] [-a rounds] [-b bits] [-C comment] [-f output_keyfile]\n"
 	    "                  [-m format] [-N new_passphrase] [-O option]\n"
-	    "                  [-t ecdsa | ecdsa-sk | ed25519 | ed25519-sk | rsa]\n"
+	    "                  [-t ecdsa|ecdsa-sk|ed25519|ed25519-sk|mldsa44-ed25519|rsa]\n"
 	    "                  [-w provider] [-Z cipher]\n"
 	    "       ssh-keygen -p [-a rounds] [-f keyfile] [-m format] [-N new_passphrase]\n"
 	    "                   [-P old_passphrase] [-Z cipher]\n"
@@ -3288,7 +3314,7 @@ usage(void)
 int
 main(int argc, char **argv)
 {
-	char comment[1024], *passphrase = NULL;
+	char comment[KEY_COMMENT_MAX], *passphrase = NULL;
 	char *rr_hostname = NULL, *ep, *fp, *ra;
 	struct sshkey *private = NULL, *public = NULL;
 	struct passwd *pw;
@@ -3305,7 +3331,7 @@ main(int argc, char **argv)
 	char *sk_attestation_path = NULL;
 	struct sshbuf *challenge = NULL, *attest = NULL;
 	size_t i, nopts = 0;
-	u_int32_t bits = 0;
+	uint32_t bits = 0;
 	uint8_t sk_flags = SSH_SK_USER_PRESENCE_REQD;
 	const char *errstr, *p;
 	int log_level = SYSLOG_LEVEL_INFO;
@@ -3344,7 +3370,7 @@ main(int argc, char **argv)
 			gen_all_hostkeys = 1;
 			break;
 		case 'b':
-			bits = (u_int32_t)strtonum(optarg, 1, UINT32_MAX,
+			bits = (uint32_t)strtonum(optarg, 1, UINT32_MAX,
 			    &errstr);
 			if (errstr)
 				fatal("Bits has bad value %s (%s)",
@@ -3703,7 +3729,7 @@ main(int argc, char **argv)
 	if (print_fingerprint || print_bubblebabble)
 		do_fingerprint(pw);
 	if (change_passphrase)
-		do_change_passphrase(pw);
+		do_change_passphrase(pw, opts, nopts);
 	if (change_comment)
 		do_change_comment(pw, identity_comment);
 #ifdef WITH_OPENSSL

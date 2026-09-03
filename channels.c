@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.c,v 1.455 2026/02/14 00:18:34 jsg Exp $ */
+/* $OpenBSD: channels.c,v 1.463 2026/06/24 11:59:09 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -359,16 +359,20 @@ channel_classify(struct ssh *ssh, Channel *c)
 {
 	struct ssh_channels *sc = ssh->chanctxt;
 	const char *type = c->xctype == NULL ? c->ctype : c->xctype;
-	const char *classifier = (c->isatty || c->remote_has_tty) ?
+	const int has_tty = c->isatty || c->remote_has_tty;
+	const char *classifier = has_tty ?
 	    sc->bulk_classifier_tty : sc->bulk_classifier_notty;
 
 	c->bulk = type != NULL && match_pattern_list(type, classifier, 0) == 1;
+	debug3("channel %d: classify type \"%s\" (%s) as %s", c->self,
+	    type ? type : "(null)", has_tty ? "with TTY" : "no TTY",
+	    c->bulk ? "bulk" : "interactive");
 }
 
 /*
  * Sets "extended type" of a channel; used by session layer to add additional
  * information about channel types (e.g. shell, login, subsystem) that can then
- * be used to select timeouts.
+ * be used to select timeouts and DSCP values.
  * Will reset c->inactive_deadline as a side-effect.
  */
 void
@@ -1190,7 +1194,8 @@ channel_send_open(struct ssh *ssh, int id)
 }
 
 void
-channel_request_start(struct ssh *ssh, int id, char *service, int wantconfirm)
+channel_request_start(struct ssh *ssh, int id, const char *service,
+    int wantconfirm)
 {
 	Channel *c = channel_lookup(ssh, id);
 	int r;
@@ -1374,6 +1379,11 @@ x11_open_helper(struct ssh *ssh, struct sshbuf *b)
 	struct ssh_channels *sc = ssh->chanctxt;
 	u_char *ucp;
 	u_int proto_len, data_len;
+
+	if (sc->x11_saved_proto == NULL) {
+		error("X11 forwarding opened before X11 forwarding requested");
+		return -1;
+	}
 
 	/* Is this being called after the refusal deadline? */
 	if (sc->x11_refuse_time != 0 &&
@@ -2096,7 +2106,8 @@ channel_post_auth_listener(struct ssh *ssh, Channel *c)
 	    SSH_CHANNEL_OPENING, newsock, newsock, -1,
 	    c->local_window_max, c->local_maxpacket,
 	    0, "accepted auth socket", 1);
-	open_preamble(ssh, __func__, nc, "auth-agent@openssh.com");
+	open_preamble(ssh, __func__, nc,
+	    c->agent_new ? "agent-connect" : "auth-agent@openssh.com");
 	if ((r = sshpkt_send(ssh)) != 0)
 		fatal_fr(r, "channel %i", c->self);
 }
@@ -2856,7 +2867,7 @@ channel_prepare_pollfd(Channel *c, u_int *next_pollfd,
 		if (ev != 0) {
 			c->pfds[3] = p;
 			pfd[p].fd = c->sock;
-			pfd[p].events = 0;
+			pfd[p].events = ev;
 			dump_channel_poll(__func__, "sock", c, p, &pfd[p]);
 			p++;
 		}
@@ -3361,7 +3372,7 @@ channel_proxy_downstream(struct ssh *ssh, Channel *downstream)
  * replaces local (proxy) channel ID with downstream channel ID.
  */
 int
-channel_proxy_upstream(Channel *c, int type, u_int32_t seq, struct ssh *ssh)
+channel_proxy_upstream(Channel *c, int type, uint32_t seq, struct ssh *ssh)
 {
 	struct sshbuf *b = NULL;
 	Channel *downstream;
@@ -3444,7 +3455,7 @@ channel_proxy_upstream(Channel *c, int type, u_int32_t seq, struct ssh *ssh)
 static int
 channel_parse_id(struct ssh *ssh, const char *where, const char *what)
 {
-	u_int32_t id;
+	uint32_t id;
 	int r;
 
 	if ((r = sshpkt_get_u32(ssh, &id)) != 0) {
@@ -3473,7 +3484,7 @@ channel_from_packet_id(struct ssh *ssh, const char *where, const char *what)
 }
 
 int
-channel_input_data(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_data(int type, uint32_t seq, struct ssh *ssh)
 {
 	const u_char *data;
 	size_t data_len, win_len;
@@ -3505,7 +3516,10 @@ channel_input_data(int type, u_int32_t seq, struct ssh *ssh)
 	 * updates are sent back. Otherwise the connection might deadlock.
 	 */
 	if (c->ostate != CHAN_OUTPUT_OPEN) {
-		c->local_window -= win_len;
+		if (win_len > c->local_window)
+			c->local_window = 0;
+		else
+			c->local_window -= win_len;
 		c->local_consumed += win_len;
 		return 0;
 	}
@@ -3541,11 +3555,11 @@ channel_input_data(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_extended_data(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_extended_data(int type, uint32_t seq, struct ssh *ssh)
 {
 	const u_char *data;
 	size_t data_len;
-	u_int32_t tcode;
+	uint32_t tcode;
 	Channel *c = channel_from_packet_id(ssh, __func__, "extended data");
 	int r;
 
@@ -3594,7 +3608,7 @@ channel_input_extended_data(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_ieof(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_ieof(int type, uint32_t seq, struct ssh *ssh)
 {
 	Channel *c = channel_from_packet_id(ssh, __func__, "ieof");
 	int r;
@@ -3619,7 +3633,7 @@ channel_input_ieof(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_oclose(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_oclose(int type, uint32_t seq, struct ssh *ssh)
 {
 	Channel *c = channel_from_packet_id(ssh, __func__, "oclose");
 	int r;
@@ -3635,10 +3649,10 @@ channel_input_oclose(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_open_confirmation(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_open_confirmation(int type, uint32_t seq, struct ssh *ssh)
 {
 	Channel *c = channel_from_packet_id(ssh, __func__, "open confirmation");
-	u_int32_t remote_window, remote_maxpacket;
+	uint32_t remote_window, remote_maxpacket;
 	int r;
 
 	if (channel_proxy_upstream(c, type, seq, ssh))
@@ -3690,10 +3704,10 @@ reason2txt(int reason)
 }
 
 int
-channel_input_open_failure(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_open_failure(int type, uint32_t seq, struct ssh *ssh)
 {
 	Channel *c = channel_from_packet_id(ssh, __func__, "open failure");
-	u_int32_t reason;
+	uint32_t reason;
 	char *msg = NULL;
 	int r;
 
@@ -3727,11 +3741,11 @@ channel_input_open_failure(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_window_adjust(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_window_adjust(int type, uint32_t seq, struct ssh *ssh)
 {
 	int id = channel_parse_id(ssh, __func__, "window adjust");
 	Channel *c;
-	u_int32_t adjust;
+	uint32_t adjust;
 	u_int new_rwin;
 	int r;
 
@@ -3757,7 +3771,7 @@ channel_input_window_adjust(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 int
-channel_input_status_confirm(int type, u_int32_t seq, struct ssh *ssh)
+channel_input_status_confirm(int type, uint32_t seq, struct ssh *ssh)
 {
 	int id = channel_parse_id(ssh, __func__, "status confirm");
 	Channel *c;
